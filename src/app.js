@@ -1,5 +1,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const handlebars = require('express-handlebars');
+const http = require('http');
+const socketIo = require('socket.io');
 const fs = require('fs').promises;
 
 class ProductManager {
@@ -90,28 +93,42 @@ class ProductManager {
             this.productIdCounter = lastProduct.id + 1;
         }
     }
+    
+    async renderProductsPage(req, res) {
+        const limit = parseInt(req.query.limit);
+
+        let productsToRender = this.products;
+
+        if (!isNaN(limit) && limit > 0) {
+            productsToRender = productsToRender.slice(0, limit);
+        }
+
+        res.render('products', { products: productsToRender });
+    }
 }
 
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server);
 const PORT = 8080;
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// Configuración de Handlebars como motor de plantillas
+app.engine('handlebars', handlebars({ defaultLayout: 'main' }));
+app.set('view engine', 'handlebars');
+
+// Rutas estáticas
+app.use(express.static('public'));
+
+// Instancia del ProductManager
 const productManager = new ProductManager('productos.json');
 const carts = [];
 
 // Rutas para la API de productos
 app.get('/api/products', async (req, res) => {
-    const limit = parseInt(req.query.limit);
-
-    let productsToReturn = productManager.products;
-
-    if (!isNaN(limit) && limit > 0) {
-        productsToReturn = productsToReturn.slice(0, limit);
-    }
-
-    res.json({ products: productsToReturn });
+    productManager.renderProductsPage(req, res);
 });
 
 app.get('/api/products/:pid', async (req, res) => {
@@ -119,9 +136,9 @@ app.get('/api/products/:pid', async (req, res) => {
     const product = productManager.products.find(product => product.id === productId);
 
     if (product) {
-        res.json({ product });
+        res.render('product', { product });
     } else {
-        res.status(404).json({ error: 'Producto no encontrado' });
+        res.status(404).json({ error: 'Product not found' });
     }
 });
 
@@ -167,6 +184,14 @@ app.get('/api/carts/:cid', (req, res) => {
     }
 });
 
+app.get('/', async (req, res) => {
+    productManager.renderProductsPage(req, res);
+});
+
+app.get('/realtimeproducts', async (req, res) => {
+    res.render('realTimeProducts', { products: productManager.products });
+});
+
 app.post('/api/carts/:cid/product/:pid', (req, res) => {
     const cartId = req.params.cid;
     const productId = parseInt(req.params.pid);
@@ -197,6 +222,31 @@ app.post('/api/carts/:cid/product/:pid', (req, res) => {
 function generateUniqueId() {
     return Math.floor(Math.random() * 1000000).toString();
 }
+
+// Configuración de Socket.IO
+io.on('connection', (socket) => {
+    console.log('New connection:', socket.id);
+
+    // Enviar la lista de productos cuando se establece la conexión
+    socket.emit('updateProductList', productManager.products);
+
+    socket.on('disconnect', () => {
+        console.log('User disconnected:', socket.id);
+    });
+
+    // Escuchar eventos para actualizaciones en tiempo real
+    socket.on('newProduct', (newProduct) => {
+        productManager.products.push(newProduct);
+        io.emit('updateProductList', productManager.products);
+    });
+
+    socket.on('deleteProduct', (productId) => {
+        productManager.deleteProduct(productId);
+        io.emit('updateProductList', productManager.products);
+    });
+    
+});
+
 
 // Inicia el servidor
 app.listen(PORT, () => {
